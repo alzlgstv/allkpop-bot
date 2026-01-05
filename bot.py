@@ -14,24 +14,28 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0"
 }
 
-# Telegram
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-
-# Несколько получателей
+# Telegram ID пользователей
 CHAT_IDS = [
     "215269880",
     "362321284",
-    "6544503730"
+    "6544503730",
+    "6644997870",
+    "304272644"
 ]
 
-CHECK_INTERVAL = 60 * 30 * 1  # 4 часа
-MAX_ARTICLES = 10            # Только первые 10 новостей
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
+CHECK_INTERVAL = 60 * 5     # 5 минут
+MAX_ARTICLES = 10           # проверяем только первые 10 новостей
 SENT_FILE = "sent.txt"
 
 # ===============================================
 
+if not BOT_TOKEN:
+    raise RuntimeError("❌ BOT_TOKEN не найден в переменных окружения")
+
 bot = telebot.TeleBot(BOT_TOKEN)
+
 
 # ---------- Работа с отправленными новостями ----------
 
@@ -41,12 +45,13 @@ def load_sent():
     with open(SENT_FILE, "r", encoding="utf-8") as f:
         return set(line.strip() for line in f if line.strip())
 
-def save_sent(links):
-    with open(SENT_FILE, "a", encoding="utf-8") as f:
-        for link in links:
-            f.write(link + "\n")
 
-# ---------- Перевод ----------
+def save_sent(link):
+    with open(SENT_FILE, "a", encoding="utf-8") as f:
+        f.write(link + "\n")
+
+
+# ---------- Перевод текста ----------
 
 def translate_to_ru(text):
     translator = GoogleTranslator(source="en", target="ru")
@@ -60,13 +65,13 @@ def translate_to_ru(text):
 
     return "\n".join(parts)
 
+
 # ---------- Основная логика ----------
 
 def check_news():
     sent_links = load_sent()
-    new_sent = set()
 
-    response = requests.get(LIST_URL, headers=HEADERS, timeout=15)
+    response = requests.get(LIST_URL, headers=HEADERS, timeout=30)
     soup = BeautifulSoup(response.text, "html.parser")
 
     articles = soup.select("a[href^='/article/']")[:MAX_ARTICLES]
@@ -78,76 +83,81 @@ def check_news():
     for article in articles:
         link = BASE + article["href"]
 
-        if link in sent_links or link in new_sent:
+        # защита от дублей
+        if link in sent_links:
             continue
 
-        print(f"🆕 Новая новость: {link}")
+        print(f"🔎 Новая новость: {link}")
 
-        article_response = requests.get(link, headers=HEADERS, timeout=15)
-        article_soup = BeautifulSoup(article_response.text, "html.parser")
+        # сразу фиксируем, чтобы не словить дубль при ошибке
+        sent_links.add(link)
+        save_sent(link)
 
-        # Заголовок
-        title_tag = article_soup.select_one("h1#article-title")
-        title = title_tag.get_text(strip=True) if title_tag else "Без заголовка"
+        try:
+            article_response = requests.get(link, headers=HEADERS, timeout=30)
+            article_soup = BeautifulSoup(article_response.text, "html.parser")
 
-        # Контент
-        content_block = article_soup.select_one("#article-content .entry_content")
-        if not content_block:
-            print("⚠️ Контент не найден")
-            continue
+            # Заголовок
+            title_tag = article_soup.select_one("h1#article-title")
+            title = title_tag.get_text(strip=True) if title_tag else "Без заголовка"
 
-        paragraphs = content_block.find_all("p")
-        text_parts = []
-
-        for p in paragraphs:
-            txt = p.get_text(" ", strip=True)
-            if not txt:
+            # Текст статьи
+            content_block = article_soup.select_one("#article-content .entry_content")
+            if not content_block:
+                print("⚠️ Контент не найден, пропуск")
                 continue
-            if txt.upper().startswith("SEE ALSO"):
+
+            paragraphs = content_block.find_all("p")
+            text_parts = []
+
+            for p in paragraphs:
+                txt = p.get_text(" ", strip=True)
+                if not txt or txt.startswith("SEE ALSO"):
+                    continue
+                text_parts.append(txt)
+
+            full_text = "\n\n".join(text_parts)
+            if not full_text:
+                print("⚠️ Пустой текст, пропуск")
                 continue
-            text_parts.append(txt)
 
-        full_text = "\n\n".join(text_parts)
-        if not full_text:
-            print("⚠️ Пустой текст")
-            continue
+            # Перевод
+            ru_text = translate_to_ru(full_text)
 
-        # Перевод
-        ru_text = translate_to_ru(full_text)
-
-        message = (
-            f"📰 <b>{title}</b>\n\n"
-            f"{ru_text}\n\n"
-            f"🔗 <a href='{link}'>Источник</a>"
-        )
-
-        for chat_id in CHAT_IDS:
-            bot.send_message(
-                chat_id,
-                message,
-                parse_mode="HTML",
-                disable_web_page_preview=True
+            message = (
+                f"📰 <b>{title}</b>\n\n"
+                f"{ru_text}\n\n"
+                f"🔗 <a href='{link}'>Источник</a>"
             )
 
-        new_sent.add(link)
-        print(f"✅ Отправлено: {title}")
+            for chat_id in CHAT_IDS:
+                bot.send_message(
+                    chat_id,
+                    message,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True
+                )
 
-        time.sleep(10)
+            print(f"✅ Отправлено: {title}")
+            time.sleep(10)  # анти-бан
 
-    if new_sent:
-        save_sent(new_sent)
+        except Exception as e:
+            print(f"❌ Ошибка при обработке новости: {e}")
+            continue
 
-# ---------- ЗАПУСК ----------
+
+# ---------- Запуск ----------
 
 if __name__ == "__main__":
-    print("🤖 Allkpop bot запущен (Railway)")
+    print("🤖 Allkpop bot запущен")
 
     while True:
         try:
             print("🔄 Проверка новостей...")
             check_news()
-            print("⏳ Ожидание 4 часа...\n")
+            print(f"⏳ Ожидание {CHECK_INTERVAL // 60} минут...\n")
             time.sleep(CHECK_INTERVAL)
+
         except Exception as e:
-            print("❌ Ошибка:", e)
+            print("❌ Критическая ошибка:", e)
             time.sleep(300)
